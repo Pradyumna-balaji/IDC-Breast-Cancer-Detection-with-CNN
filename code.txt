@@ -1,0 +1,189 @@
+import os
+import random
+import shutil
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (SeparableConv2D, MaxPooling2D, Flatten,
+                                     Dropout, Dense, Activation, BatchNormalization)
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import classification_report, confusion_matrix
+
+# Configuration
+INPUT_DATASET = r"C:\Users\DELL\.cache\kagglehub\datasets\paultimothymooney\breast-histopathology-images\versions\1"
+BASE_PATH = r"Desktop/mywork"
+TRAIN_PATH = os.path.join(BASE_PATH, "training")
+VAL_PATH = os.path.join(BASE_PATH, "validation")
+TEST_PATH = os.path.join(BASE_PATH, "testing")
+
+TRAIN_SPLIT = 0.8
+VAL_SPLIT = 0.1
+IMG_DIMS = (48, 48)
+NUM_CLASSES = 2
+BATCH_SIZE = 32
+NUM_EPOCHS = 40
+INIT_LR = 1e-2
+from imutils import paths
+
+def build_dataset_structure():
+    image_paths = list(paths.list_images(INPUT_DATASET))
+    random.seed(7)
+    random.shuffle(image_paths)
+
+    i = int(len(image_paths) * TRAIN_SPLIT)
+    train_paths = image_paths[:i]
+    test_paths = image_paths[i:]
+
+    j = int(len(train_paths) * VAL_SPLIT)
+    val_paths = train_paths[:j]
+    train_paths = train_paths[j:]
+
+    datasets = [("training", train_paths, TRAIN_PATH),
+                ("validation", val_paths, VAL_PATH),
+                ("testing", test_paths, TEST_PATH)]
+
+    for set_type, paths_list, base_path in datasets:
+        print(f"Building {set_type} set")
+        for path in paths_list:
+            label = path.split(os.path.sep)[-1][-5:-4]
+            label_path = os.path.join(base_path, label)
+            os.makedirs(label_path, exist_ok=True)
+            shutil.copy2(path, os.path.join(label_path, os.path.basename(path)))
+def build_model(input_shape=(48, 48, 3), classes=2):
+    model = Sequential()
+    channel_dim = -1
+
+    model.add(SeparableConv2D(32, (3, 3), padding="same", input_shape=input_shape))
+    model.add(Activation("relu"))
+    model.add(BatchNormalization(axis=channel_dim))
+    model.add(MaxPooling2D(pool_size=(2, 2)))
+    model.add(Dropout(0.25))
+
+    model.add(SeparableConv2D(64, (3, 3), padding="same"))
+    model.add(Activation("relu"))
+    model.add(BatchNormalization(axis=channel_dim))
+    model.add(SeparableConv2D(64, (3, 3), padding="same"))
+    model.add(Activation("relu"))
+    model.add(BatchNormalization(axis=channel_dim))
+    model.add(MaxPooling2D(pool_size=(2, 2)))
+    model.add(Dropout(0.25))
+
+    model.add(SeparableConv2D(128, (3, 3), padding="same"))
+    model.add(Activation("relu"))
+    model.add(BatchNormalization(axis=channel_dim))
+    model.add(SeparableConv2D(128, (3, 3), padding="same"))
+    model.add(Activation("relu"))
+    model.add(BatchNormalization(axis=channel_dim))
+    model.add(SeparableConv2D(128, (3, 3), padding="same"))
+    model.add(Activation("relu"))
+    model.add(BatchNormalization(axis=channel_dim))
+    model.add(MaxPooling2D(pool_size=(2, 2)))
+    model.add(Dropout(0.25))
+
+    model.add(Flatten())
+    model.add(Dense(256))
+    model.add(Activation("relu"))
+    model.add(BatchNormalization())
+    model.add(Dropout(0.5))
+
+    model.add(Dense(classes))
+    model.add(Activation("softmax"))
+
+    return model
+def train_and_evaluate():
+    train_aug = ImageDataGenerator(
+        rescale=1 / 255.0,
+        rotation_range=20,
+        zoom_range=0.05,
+        width_shift_range=0.1,
+        height_shift_range=0.1,
+        shear_range=0.05,
+        horizontal_flip=True,
+        vertical_flip=True,
+        fill_mode="nearest"
+    )
+
+    val_aug = ImageDataGenerator(rescale=1 / 255.0)
+
+    train_gen = train_aug.flow_from_directory(
+        TRAIN_PATH,
+        class_mode="categorical",
+        target_size=IMG_DIMS,
+        color_mode="rgb",
+        shuffle=True,
+        batch_size=BATCH_SIZE
+    )
+
+    val_gen = val_aug.flow_from_directory(
+        VAL_PATH,
+        class_mode="categorical",
+        target_size=IMG_DIMS,
+        color_mode="rgb",
+        shuffle=False,
+        batch_size=BATCH_SIZE
+    )
+
+    test_gen = val_aug.flow_from_directory(
+        TEST_PATH,
+        class_mode="categorical",
+        target_size=IMG_DIMS,
+        color_mode="rgb",
+        shuffle=False,
+        batch_size=BATCH_SIZE
+    )
+
+    # Class Weights
+    labels = train_gen.classes
+    class_totals = np.bincount(labels)
+    class_weight = {i: max(class_totals) / class_totals[i] for i in range(NUM_CLASSES)}
+
+    model = build_model(input_shape=(48, 48, 3), classes=NUM_CLASSES)
+    opt = Adam(learning_rate=INIT_LR)
+    model.compile(loss="categorical_crossentropy", optimizer=opt, metrics=["accuracy"])
+
+    H = model.fit(
+        train_gen,
+        steps_per_epoch=train_gen.samples // BATCH_SIZE,
+        validation_data=val_gen,
+        validation_steps=val_gen.samples // BATCH_SIZE,
+        class_weight=class_weight,
+        epochs=NUM_EPOCHS
+    )
+
+    # Evaluation
+    test_gen.reset()
+    preds = model.predict(test_gen, steps=(test_gen.samples // BATCH_SIZE) + 1)
+    pred_indices = np.argmax(preds, axis=1)
+
+    print("\nClassification Report:")
+    print(classification_report(test_gen.classes, pred_indices, target_names=test_gen.class_indices.keys()))
+
+    cm = confusion_matrix(test_gen.classes, pred_indices)
+    print("Confusion Matrix:\n", cm)
+
+    total = cm.sum()
+    accuracy = np.trace(cm) / total
+    specificity = cm[1,1] / (cm[1,1] + cm[1,0])
+    sensitivity = cm[0,0] / (cm[0,0] + cm[0,1])
+
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Specificity: {specificity:.4f}")
+    print(f"Sensitivity: {sensitivity:.4f}")
+
+    # Plotting
+    plt.style.use("ggplot")
+    plt.figure(figsize=(10, 6))
+    plt.plot(H.history["loss"], label="train_loss")
+    plt.plot(H.history["val_loss"], label="val_loss")
+    plt.plot(H.history["accuracy"], label="train_acc")
+    plt.plot(H.history["val_accuracy"], label="val_acc")
+    plt.title("Training Loss and Accuracy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss/Accuracy")
+    plt.legend()
+    plt.show()
+
+build_dataset_structure()
+train_and_evaluate()
